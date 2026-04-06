@@ -1,3 +1,5 @@
+import { Tool } from "./tool-registry";
+
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
 export interface ToolCall {
@@ -7,13 +9,6 @@ export interface ToolCall {
     name: string;
     arguments: string;
   };
-}
-
-export interface Tool {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  execute(params: Record<string, unknown>): Promise<string>;
 }
 
 export interface Message {
