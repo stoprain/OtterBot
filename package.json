@@ -1,0 +1,22 @@
+{
+  "name": "otterbot",
+  "version": "0.0.1",
+  "description": "A personal coding agent built from scratch for learning purpose",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "agent": "ts-node src/agent-loop.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=23"
+  }
+}
