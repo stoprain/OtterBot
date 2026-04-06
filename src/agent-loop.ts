@@ -9,6 +9,26 @@ export interface Message {
   tool_calls?: ToolCall[];
 }
 
+export interface StepResult {
+  step: number;
+  thought: string | null;
+  toolCalls: ToolCall[];
+  observations: string[];
+  tokenUsage: LLMResponse["usage"];
+}
+
+export interface AgentLoopOptions {
+  maxSteps?: number;
+  timeoutMs?: number;
+  onStep?: (step: StepResult) => void;
+}
+
+export interface AgentResult {
+  answer: string;
+  steps: number;
+  totalTokenUsage: LLMResponse["usage"];
+}
+
 export interface LLMClient {
   chat(messages: Message[], tools: Tool[]): Promise<LLMResponse>;
 }
@@ -23,108 +43,173 @@ export interface LLMResponse {
   };
 }
 
-// import * as dotenv from "dotenv";
-// import * as path from "path";
+export class AgentLoop {
+  private readonly llm: LLMClient;
+  private readonly tools: Map<string, Tool>;
+  private readonly options: Required<AgentLoopOptions>;
 
-// dotenv.config({ path: path.resolve(__dirname, "../.env") });
+  constructor(
+    llm: LLMClient,
+    tools: Tool[],
+    options: AgentLoopOptions = {}
+  ) {
+    this.llm = llm;
 
-// import { CopilotClient } from "./copilot-client";
-// import { ToolRegistry } from "./tool-registry";
-// import { readFileTool } from "./tools/read-file";
+    this.tools = new Map(tools.map((t) => [t.name, t]));
 
-// async function main(): Promise<void> {
-//   const registry = new ToolRegistry()
-//     .register(readFileTool);
+    this.options = {
+      maxSteps: options.maxSteps ?? 20,
+      timeoutMs: options.timeoutMs ?? 60_000,
+      onStep: options.onStep ?? (() => { }),
+    };
+  }
 
-//   console.log(`Registered ${registry.size} tools: ${registry.list().map((t) => t.name).join(", ")}\n`);
+  /**
+   * Run the agent on a task.
+   *
+   * @param systemPrompt 
+   * @param userTask     
+   * @param history   
+   */
+  async run(
+    systemPrompt: string,
+    userTask: string,
+    history: Message[] = []
+  ): Promise<AgentResult> {
+    // ── Initialise conversation ──────────────────────────────────────────────
+    // The conversation always starts with a system message, then the existing
+    // history (if any), then the new user task.
+    const messages: Message[] = [
+      { role: "system", content: systemPrompt },
+      ...history,
+      { role: "user", content: userTask },
+    ];
 
-//   console.log("\n--- 2. read_file: read the main README ---");
-//   const readResult = await registry.execute("read_file", {
-//     path: path.join('./', "README.md"),
-//   });
-//   // Print just the first 300 chars so the demo output is readable.
-//   console.log(readResult.slice(0, 300) + (readResult.length > 300 ? "\n…(truncated)" : ""));
+    const toolsList = Array.from(this.tools.values());
+    const totalUsage: LLMResponse["usage"] = {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
 
-//   // const client = new CopilotClient({
-//   //   model: "gpt-4o",
-//   //   temperature: 0,
-//   // });
+    const deadline = Date.now() + this.options.timeoutMs;
 
-//   // console.log("Sending a simple question to GitHub Copilot...\n");
+    // ── Main loop ────────────────────────────────────────────────────────────
+    for (let step = 1; step <= this.options.maxSteps; step++) {
+      // Safety: respect the wall-clock timeout.
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Agent timed out after ${this.options.timeoutMs}ms (step ${step})`
+        );
+      }
 
-//   // const response = await client.chat(
-//   //   [
-//   //     {
-//   //       role: "system",
-//   //       content: "You are a concise coding assistant. Answer in 2-3 sentences.",
-//   //     },
-//   //     {
-//   //       role: "user",
-//   //       content: "What is the difference between a coding agent and a regular LLM chatbot?",
-//   //     },
-//   //   ],
-//   //   []
-//   // );
+      // ── THINK ────────────────────────────────────────────────────────────
+      // Send the entire conversation to the LLM.  It returns either:
+      //   a) A plain text answer  → we are done.
+      //   b) One or more tool calls → we act on them and loop again.
+      const response = await this.llm.chat(messages, toolsList);
 
-//   // console.log("Answer:");
-//   // console.log(response.content);
-//   // console.log();
-//   // console.log("Token usage:", response.usage);
+      // Accumulate token usage for the caller.
+      totalUsage.prompt_tokens += response.usage.prompt_tokens;
+      totalUsage.completion_tokens += response.usage.completion_tokens;
+      totalUsage.total_tokens += response.usage.total_tokens;
 
-//   // console.log("\n--- Now testing tool-call flow ---\n");
+      // Add the assistant's response to the conversation.
+      // Important: we must include the tool_calls array (even if empty) so the
+      // API can match tool results to the calls that triggered them.
+      messages.push({
+        role: "assistant",
+        content: response.content,
+        tool_calls: response.tool_calls.length > 0 ? response.tool_calls : undefined,
+      });
 
-//   // const mockTool = {
-//   //   name: "get_current_time",
-//   //   description: "Returns the current UTC time as an ISO string.",
-//   //   parameters: {
-//   //     type: "object",
-//   //     properties: {},
-//   //     required: [],
-//   //   },
-//   //   execute: async (_params: Record<string, unknown>) => {
-//   //     return new Date().toISOString();
-//   //   },
-//   // };
+      const stepResult: StepResult = {
+        step,
+        thought: response.content,
+        toolCalls: response.tool_calls,
+        observations: [],
+        tokenUsage: response.usage,
+      };
 
-//   // const toolResponse = await client.chat(
-//   //   [
-//   //     {
-//   //       role: "system",
-//   //       content: "You are a helpful assistant. Use the get_current_time tool to answer questions about time.",
-//   //     },
-//   //     { role: "user", content: "What time is it right now?" },
-//   //   ],
-//   //   [mockTool]
-//   // );
+      // ── CHECK FOR FINAL ANSWER ───────────────────────────────────────────
+      // If the LLM returned no tool calls, it's done — return the answer.
+      if (response.tool_calls.length === 0) {
+        if (!response.content) {
+          throw new Error("LLM returned neither a tool call nor a text answer");
+        }
+        this.options.onStep(stepResult);
+        return {
+          answer: response.content,
+          steps: step,
+          totalTokenUsage: totalUsage,
+        };
+      }
 
-//   // if (toolResponse.tool_calls.length > 0) {
-//   //   const call = toolResponse.tool_calls[0]!;
-//   //   console.log(`LLM decided to call tool: ${call.function.name}`);
-//   //   console.log(`Arguments: ${call.function.arguments}`);
+      // ── ACT + OBSERVE ────────────────────────────────────────────────────
+      // Execute every tool call the LLM requested (potentially in parallel).
+      const toolResultMessages = await Promise.all(
+        response.tool_calls.map((call) => this.executeToolCall(call))
+      );
 
-//   //   const result = await mockTool.execute({});
-//   //   console.log(`Tool returned: ${result}`);
+      stepResult.observations = toolResultMessages.map((m) => m.content ?? "");
 
-//   //   const finalResponse = await client.chat(
-//   //     [
-//   //       { role: "system", content: "You are a helpful assistant." },
-//   //       { role: "user", content: "What time is it right now?" },
-//   //       {
-//   //         role: "assistant",
-//   //         content: null,
-//   //         tool_calls: toolResponse.tool_calls,
-//   //       },
-//   //       {
-//   //         role: "tool",
-//   //         tool_call_id: call.id,
-//   //         content: result,
-//   //       },
-//   //     ],
-//   //     [mockTool]
-//   //   );
+      // Append all tool results to the conversation so the LLM can see them.
+      messages.push(...toolResultMessages);
 
-//   //   console.log("\nFinal answer:", finalResponse.content);
-//   // } else {
-//   //   console.log("Model answered directly (no tool call):", toolResponse.content);
-//   // }
-// };
+      // Notify the caller about this step.
+      this.options.onStep(stepResult);
+    }
+
+    // ── SAFETY: max steps exceeded ───────────────────────────────────────────
+    throw new Error(
+      `Agent exceeded maxSteps (${this.options.maxSteps}) without producing a final answer`
+    );
+  }
+
+  /**
+   * Execute a single tool call requested by the LLM.
+   * Returns a 'tool' role message that can be appended to the conversation.
+   */
+  private async executeToolCall(call: ToolCall): Promise<Message> {
+    const tool = this.tools.get(call.function.name);
+
+    // If the LLM hallucinated a tool name, return an error observation instead
+    // of crashing — the LLM can recover by trying a different approach.
+    if (!tool) {
+      return {
+        role: "tool",
+        tool_call_id: call.id,
+        content: `Error: unknown tool "${call.function.name}". Available tools: ${[...this.tools.keys()].join(", ")}`,
+      };
+    }
+
+    // Parse the JSON arguments string into an object.
+    let params: Record<string, unknown>;
+    try {
+      params = JSON.parse(call.function.arguments) as Record<string, unknown>;
+    } catch {
+      return {
+        role: "tool",
+        tool_call_id: call.id,
+        content: `Error: could not parse arguments JSON: ${call.function.arguments}`,
+      };
+    }
+
+    // Execute the tool and capture its result (or any error).
+    try {
+      const result = await tool.execute(params);
+      return {
+        role: "tool",
+        tool_call_id: call.id,
+        content: result,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        role: "tool",
+        tool_call_id: call.id,
+        content: `Error executing ${tool.name}: ${message}`,
+      };
+    }
+  }
+}
