@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
-    "agent": "ts-node src/agent-loop.ts"
+    "agent": "ts-node src/index.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5"

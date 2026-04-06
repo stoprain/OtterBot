@@ -1,32 +1,5 @@
 import { Tool } from "./tool-registry";
-
-export type MessageRole = "system" | "user" | "assistant" | "tool";
-
-export interface ToolCall {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-export interface Message {
-  role: MessageRole;
-  content: string | null;
-  tool_call_id?: string;
-  tool_calls?: ToolCall[];
-}
-
-export interface LLMResponse {
-  content: string | null;
-  tool_calls: ToolCall[];
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
+import { LLMClient, LLMResponse, Message } from "./agent-loop";
 
 interface ApiMessage {
   role: string;
@@ -74,10 +47,6 @@ export interface CopilotClientOptions {
   maxTokens?: number;
   temperature?: number;
   baseUrl?: string;
-}
-
-export interface LLMClient {
-  chat(messages: Message[], tools: Tool[]): Promise<LLMResponse>;
 }
 
 export class CopilotClient implements LLMClient {

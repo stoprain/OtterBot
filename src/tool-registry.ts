@@ -5,6 +5,15 @@ export interface Tool {
   execute(params: Record<string, unknown>): Promise<string>;
 }
 
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 export class ToolRegistry {
   private readonly tools: Map<string, Tool> = new Map();
 
